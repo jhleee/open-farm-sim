@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import hashlib
+import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from app.domain import ActionType, build_season, default_farm
 from app.engine import ValidationError, apply_action, end_day, farm_snapshot, restore_last_day
+from app.persistence import FarmStore
 
 app = FastAPI(title="Open Farm Sim API", version="2.0.0")
 
 SEASON = build_season("season-001", seed=2026, total_days=14, crop_count=4)
-FARMS = {}
+STORE = FarmStore(os.getenv("FARM_DB_PATH", "data/farms.sqlite3"))
+FARMS, FARM_OWNERS = STORE.load_farms()
 
 
 class ActionRequest(BaseModel):
@@ -20,6 +24,22 @@ class ActionRequest(BaseModel):
     plot_id: int | None = Field(default=None)
     crop_id: str | None = Field(default=None)
     idempotency_key: str | None = Field(default=None, min_length=4, max_length=128)
+
+
+class ClaimRequest(BaseModel):
+    claim_token: str = Field(min_length=8, max_length=128)
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _assert_farm_access(farm_id: str, token: str | None) -> None:
+    owner_hash = FARM_OWNERS.get(farm_id)
+    if not owner_hash:
+        return
+    if not token or _hash_token(token) != owner_hash:
+        raise HTTPException(403, "farm_forbidden")
 
 
 @app.get("/v1/version")
@@ -56,25 +76,45 @@ def get_season_almanac():
 
 
 @app.post("/v1/farms/{farm_id}/join")
-def join_season(farm_id: str):
+def join_season(farm_id: str, x_farm_token: str | None = Header(default=None)):
     if farm_id not in FARMS:
         FARMS[farm_id] = default_farm(farm_id, SEASON.season_id)
+        owner_hash = _hash_token(x_farm_token) if x_farm_token else None
+        if owner_hash:
+            FARM_OWNERS[farm_id] = owner_hash
+        STORE.save_farm(FARMS[farm_id], owner_token_hash=owner_hash)
+    _assert_farm_access(farm_id, x_farm_token)
     return farm_snapshot(FARMS[farm_id], SEASON)
 
 
-@app.get("/v1/farms/{farm_id}/state")
-def get_state(farm_id: str):
+@app.post("/v1/farms/{farm_id}/claim")
+def claim_farm(farm_id: str, payload: ClaimRequest):
     farm = FARMS.get(farm_id)
     if not farm:
         raise HTTPException(404, "farm_not_found")
+    if farm_id in FARM_OWNERS:
+        raise HTTPException(409, "farm_already_claimed")
+    owner_hash = _hash_token(payload.claim_token)
+    FARM_OWNERS[farm_id] = owner_hash
+    STORE.set_owner_hash(farm_id, owner_hash)
+    return {"farm_id": farm_id, "claimed": True}
+
+
+@app.get("/v1/farms/{farm_id}/state")
+def get_state(farm_id: str, x_farm_token: str | None = Header(default=None)):
+    farm = FARMS.get(farm_id)
+    if not farm:
+        raise HTTPException(404, "farm_not_found")
+    _assert_farm_access(farm_id, x_farm_token)
     return farm_snapshot(farm, SEASON)
 
 
 @app.get("/v1/farms/{farm_id}/logs")
-def get_logs(farm_id: str):
+def get_logs(farm_id: str, x_farm_token: str | None = Header(default=None)):
     farm = FARMS.get(farm_id)
     if not farm:
         raise HTTPException(404, "farm_not_found")
+    _assert_farm_access(farm_id, x_farm_token)
     return {
         "farm_id": farm_id,
         "actions": farm.action_log,
@@ -83,12 +123,13 @@ def get_logs(farm_id: str):
 
 
 @app.post("/v1/farms/{farm_id}/actions")
-def submit_action(farm_id: str, payload: ActionRequest):
+def submit_action(farm_id: str, payload: ActionRequest, x_farm_token: str | None = Header(default=None)):
     farm = FARMS.get(farm_id)
     if not farm:
         raise HTTPException(404, "farm_not_found")
+    _assert_farm_access(farm_id, x_farm_token)
     try:
-        return apply_action(
+        result = apply_action(
             farm,
             SEASON,
             payload.action,
@@ -96,36 +137,43 @@ def submit_action(farm_id: str, payload: ActionRequest):
             payload.crop_id,
             payload.idempotency_key,
         )
+        STORE.save_farm(farm)
+        return result
     except ValidationError as exc:
         raise HTTPException(400, {"code": exc.code, "message": exc.message}) from exc
 
 
 @app.post("/v1/farms/{farm_id}/end-day")
-def submit_end_day(farm_id: str):
+def submit_end_day(farm_id: str, x_farm_token: str | None = Header(default=None)):
     farm = FARMS.get(farm_id)
     if not farm:
         raise HTTPException(404, "farm_not_found")
+    _assert_farm_access(farm_id, x_farm_token)
     end_day(farm, SEASON)
+    STORE.save_farm(farm)
     return farm_snapshot(farm, SEASON)
 
 
 @app.post("/v1/farms/{farm_id}/rollback")
-def rollback(farm_id: str):
+def rollback(farm_id: str, x_farm_token: str | None = Header(default=None)):
     farm = FARMS.get(farm_id)
     if not farm:
         raise HTTPException(404, "farm_not_found")
+    _assert_farm_access(farm_id, x_farm_token)
     try:
         restore_last_day(farm)
+        STORE.save_farm(farm)
     except ValidationError as exc:
         raise HTTPException(400, {"code": exc.code, "message": exc.message}) from exc
     return farm_snapshot(farm, SEASON)
 
 
 @app.get("/v1/farms/{farm_id}/report")
-def farm_report(farm_id: str):
+def farm_report(farm_id: str, x_farm_token: str | None = Header(default=None)):
     farm = FARMS.get(farm_id)
     if not farm:
         raise HTTPException(404, "farm_not_found")
+    _assert_farm_access(farm_id, x_farm_token)
     snap = farm_snapshot(farm, SEASON)
     return {
         "farm_id": farm_id,

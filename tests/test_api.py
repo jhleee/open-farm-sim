@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from app.main import FARMS, app
+from app.main import FARMS, FARM_OWNERS, app
 
 
 client = TestClient(app)
@@ -8,6 +8,7 @@ client = TestClient(app)
 
 def setup_function():
     FARMS.clear()
+    FARM_OWNERS.clear()
 
 
 def test_join_state_and_version_endpoints():
@@ -82,3 +83,25 @@ def test_web_pages_are_served():
     ops = client.get('/web/ops')
     assert ops.status_code == 200
     assert '랭킹 / 작업로그' in ops.text
+
+def test_claim_and_token_auth_guard():
+    client.post('/v1/farms/secure/join')
+    claim = client.post('/v1/farms/secure/claim', json={'claim_token': 'secret-1234'})
+    assert claim.status_code == 200
+
+    blocked = client.get('/v1/farms/secure/state')
+    assert blocked.status_code == 403
+
+    ok = client.get('/v1/farms/secure/state', headers={'x-farm-token': 'secret-1234'})
+    assert ok.status_code == 200
+
+
+def test_join_with_token_sets_owner_immediately():
+    created = client.post('/v1/farms/owned/join', headers={'x-farm-token': 'init-token-999'})
+    assert created.status_code == 200
+
+    blocked = client.post('/v1/farms/owned/actions', json={'action': 'rest'})
+    assert blocked.status_code == 403
+
+    allowed = client.post('/v1/farms/owned/actions', json={'action': 'rest'}, headers={'x-farm-token': 'init-token-999'})
+    assert allowed.status_code == 200
