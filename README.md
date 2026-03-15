@@ -30,7 +30,8 @@
 - `GET /v1/version`
 - `GET /v1/season`
 - `GET /v1/season/almanac`
-- `POST /v1/farms/{farm_id}/join`
+- `POST /v1/farms/{farm_id}/join` (optional `x-farm-token` 헤더로 생성 즉시 소유권 설정)
+- `POST /v1/farms/{farm_id}/claim`
 - `GET /v1/farms/{farm_id}/state`
 - `GET /v1/farms/{farm_id}/logs`
 - `POST /v1/farms/{farm_id}/actions`
@@ -60,10 +61,17 @@ python client/sample_agent.py
 pytest -q
 ```
 
-테스트는 도메인/엔진/API 수준 기능을 포괄하며, 결정성/상태전이/행동력/이벤트 제약/중복제출/롤백/리더보드/리포트 경로를 검증합니다.
+테스트는 도메인/엔진/API 수준 기능을 포괄하며, 결정성/상태전이/행동력/이벤트 제약/중복제출/롤백/리더보드/리포트 경로를 검증합니다. farm 소유권 claim + 토큰 인증 보호, sqlite 영속화 round-trip도 포함합니다.
 추가로 `tests/test_e2e.py`에서 한 시즌 전체를 API로 관통 실행해 상태/로그/리포트/리더보드 일관성을 검증합니다.
 `tests/test_scenarios_core.py`와 `tests/test_scenarios_matrix.py`로 시나리오를 분리했습니다. core에서는 페스티벌 수익 보너스, 롤백 정합성, 동일 시퀀스/동일 정책 결과 일치를 검증하고, matrix에서는 100건 시나리오(5개 seed x 20 전략)로 주관적 sanity와 객관적 검토(재현성, 전략 다양성)를 검증합니다.
 
+
+
+## 영속화/소유권 인증
+
+- 농장 상태는 기본적으로 `data/farms.sqlite3` 에 저장됩니다. (`FARM_DB_PATH` 환경변수로 변경 가능)
+- `POST /v1/farms/{farm_id}/claim` 으로 farm_id 소유권을 claim 할 수 있습니다.
+- 이미 claim 된 farm 접근/수정에는 `x-farm-token` 헤더가 필요합니다.
 
 ## Docker 빌드/실행
 
